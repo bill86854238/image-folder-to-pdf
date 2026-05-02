@@ -3,152 +3,203 @@ import img2pdf
 import re
 from opencc import OpenCC
 
-# 初始化簡體轉繁體
+# =================================================================
+# 1. 全域初始化設定
+# =================================================================
+
+# 初始化 OpenCC 轉換器：'s2t' 代表「簡體轉繁體 (Simplified to Traditional)」
 cc = OpenCC('s2t')
 
-# 正則表達式，抓取數字
+# 正則表達式 (Regex)：用來抓取字串中出現的「數字」
 number_pattern = re.compile(r'(\d+)')
 
-# 補零位數固定為 4 位
+# 補零設定：統一補齊為 4 位數 (例如 5 變成 0005)
 ZERO_PADDING = 4
 
-def convert_comic(comic_path):
-    """處理單一影像項目資料夾，將其子目錄轉換為 PDF"""
-    if not os.path.isdir(comic_path):
+# =================================================================
+# 2. 輔助函式
+# =================================================================
+
+def get_folder_info(folder_name):
+    """從資料夾名稱提取編號與類型（卷或話）"""
+    match = number_pattern.search(folder_name)
+    number = int(match.group(1)) if match else 0
+    is_volume = any(k in folder_name for k in ["卷", "捲"])
+    return number, is_volume
+
+# =================================================================
+# 3. 核心轉換函式
+# =================================================================
+
+def convert_item(item_path, combine_chapters=True):
+    """
+    處理單一影像項目資料夾。
+    combine_chapters: 是否啟動每 10 話合併模式。
+    """
+    if not os.path.isdir(item_path):
         return
 
-    comic_folder_name = os.path.basename(comic_path)
-    print(f"\n📂 正在處理項目：{comic_folder_name}")
-    print(f"路徑：{comic_path}")
+    item_name = os.path.basename(item_path)
+    print(f"\n📂 正在處理項目：{item_name}")
 
-    # 取得項目資料夾下的所有子目錄
-    sub_folders = [f for f in os.listdir(comic_path) if os.path.isdir(os.path.join(comic_path, f))]
+    # 取得所有子資料夾並排序
+    sub_folders = sorted([f for f in os.listdir(item_path) if os.path.isdir(os.path.join(item_path, f))])
     
     if not sub_folders:
-        print(f"ℹ️  在 {comic_folder_name} 中找不到任何子目錄。")
+        print(f"ℹ️  在「{item_name}」中找不到任何子資料夾。")
         return
 
-    for folder in sub_folders:
-        folder_path = os.path.join(comic_path, folder)
-        
-        # 取得圖片檔案
+    # 將資料夾分類為「卷」與「話」
+    volumes = []
+    chapters = []
+    for f in sub_folders:
+        _, is_vol = get_folder_info(f)
+        if is_vol:
+            volumes.append(f)
+        else:
+            chapters.append(f)
+
+    # --- 處理 [卷]：維持一卷一個 PDF ---
+    if volumes:
+        print(f"  > 偵測到 {len(volumes)} 個「卷」項目，將獨立處理...")
+        for folder in volumes:
+            process_folders_to_pdf(item_path, [folder], item_name)
+
+    # --- 處理 [話]：根據設定決定是否合併 ---
+    if chapters:
+        if combine_chapters:
+            # 每 10 話一組進行合併
+            chunk_size = 10
+            print(f"  > 偵測到 {len(chapters)} 個「話」項目，將以 {chunk_size} 話為單位合併...")
+            for i in range(0, len(chapters), chunk_size):
+                chunk = chapters[i:i + chunk_size]
+                process_folders_to_pdf(item_path, chunk, item_name, is_combined=True)
+        else:
+            # 獨立處理每一話
+            print(f"  > 偵測到 {len(chapters)} 個「話」項目，將獨立處理...")
+            for folder in chapters:
+                process_folders_to_pdf(item_path, [folder], item_name)
+
+def process_folders_to_pdf(item_path, folders, item_name, is_combined=False):
+    """
+    將一或多個資料夾內的圖片合併為一個 PDF。
+    folders: 資料夾名稱清單（若長度 > 1 則代表要合併）。
+    """
+    all_image_paths = []
+    display_numbers = []
+
+    # 1. 蒐集所有圖片路徑與編號資訊
+    for folder in folders:
+        folder_path = os.path.join(item_path, folder)
+        num, is_vol = get_folder_info(folder)
+        display_numbers.append(f"{num:0{ZERO_PADDING}}")
+
+        # 讀取並排序資料夾內的圖片
         try:
             images = sorted(
-                [
-                    f for f in os.listdir(folder_path)
-                    if f.lower().endswith((".jpg", ".jpeg", ".png"))
-                ],
+                [f for f in os.listdir(folder_path) if f.lower().endswith((".jpg", ".jpeg", ".png"))],
                 key=lambda x: int(os.path.splitext(x)[0]) if os.path.splitext(x)[0].isdigit() else x
             )
+            all_image_paths.extend([os.path.join(folder_path, img) for img in images])
         except Exception as e:
-            print(f"❌ 讀取資料夾出錯 {folder}: {e}")
-            continue
+            print(f"  ❌ 讀取 {folder} 出錯: {e}")
 
-        image_paths = [os.path.join(folder_path, img) for img in images]
+    if not all_image_paths:
+        return
 
-        if image_paths:
-            match = number_pattern.search(folder)
-            if match:
-                number = int(match.group(1))
-                number_str = f"{number:0{ZERO_PADDING}}"
-
-                if "卷" in folder or "捲" in folder:
-                    base_name = f"第{number_str}卷"
-                else:
-                    base_name = f"第{number_str}話"
-
-                # 取出標題部分並清除關鍵字
-                title = re.sub(r'(第)?\d+(話|话|回|卷|捲)?', '', folder).strip()
-                # 簡體轉繁體
-                title = cc.convert(title)
-
-                if title:
-                    filename = f"{comic_folder_name} {base_name}-{title}.pdf"
-                else:
-                    filename = f"{comic_folder_name} {base_name}.pdf"
-            else:
-                filename = f"{comic_folder_name} {cc.convert(folder)}.pdf"
-
-            output_pdf = os.path.join(comic_path, filename)
-
-            try:
-                with open(output_pdf, "wb") as f:
-                    f.write(img2pdf.convert(image_paths))
-                print(f"  ✅ 完成：{filename}")
-            except Exception as e:
-                print(f"  ❌ 轉換失敗 {filename}: {e}")
+    # 2. 決定輸出的 PDF 檔名
+    # 如果是單一資料夾，嘗試抓取標題；如果是合併檔，則顯示編號範圍
+    if not is_combined:
+        folder = folders[0]
+        num, is_vol = get_folder_info(folder)
+        num_str = f"{num:0{ZERO_PADDING}}"
+        type_str = "卷" if is_vol else "話"
+        
+        # 提取標題文字
+        title = re.sub(r'(第)?\d+(話|话|回|卷|捲)?', '', folder).strip()
+        title = cc.convert(title)
+        
+        if title:
+            filename = f"{item_name} 第{num_str}{type_str}-{title}.pdf"
         else:
-            # 略過不含圖片的資料夾，不印出警告以保持畫面整潔
-            pass
+            filename = f"{item_name} 第{num_str}{type_str}.pdf"
+    else:
+        # 合併模式：格式為「第0001-0010話」
+        start_num = display_numbers[0]
+        end_num = display_numbers[-1]
+        filename = f"{item_name} 第{start_num}-{end_num}話.pdf"
+
+    # 3. 執行轉換
+    output_pdf = os.path.join(item_path, filename)
+    try:
+        with open(output_pdf, "wb") as f:
+            f.write(img2pdf.convert(all_image_paths))
+        print(f"  ✅ 完成：{filename}")
+    except Exception as e:
+        print(f"  ❌ 轉換失敗 {filename}: {e}")
+
+# =================================================================
+# 4. 主程式流程
+# =================================================================
 
 def main():
-    # 設定根目錄為程式所在資料夾
     root_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # 取得所有項目資料夾（排除隱藏資料夾）
-    comic_folders = sorted([
-        f for f in os.listdir(root_dir) 
-        if os.path.isdir(os.path.join(root_dir, f)) and not f.startswith('.')
-    ])
+    item_folders = sorted([f for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f)) and not f.startswith('.')])
 
-    if not comic_folders:
-        print("❌ 在當前目錄下找不到任何項目資料夾。")
-        input("\n按下 Enter 鍵結束...")
+    if not item_folders:
+        print("❌ 找不到可處理的項目資料夾。")
         return
 
     print("========================================")
-    print("   影像資料夾 PDF 轉換工具 (多模式支援)")
+    print("   影像資料夾 PDF 轉換工具 (v1.2.0)")
     print("========================================")
-    print(f"當前目錄：{root_dir}")
-    print(f"找到 {len(comic_folders)} 個項目資料夾。")
+    print(f"找到 {len(item_folders)} 個項目。")
     print("----------------------------------------")
-    print("請選擇執行模式：")
-    print("[1] 處理所有項目 (自動掃描兩層)")
-    print("[2] 手動選取項目 (可多選)")
+    print("[1] 自動處理所有項目")
+    print("[2] 手動選取特定項目")
     print("----------------------------------------")
     
-    choice = input("請輸入選項 (1 或 2): ").strip()
+    choice = input("請輸入 1 或 2: ").strip()
+    
+    # 問合併意願
+    do_combine = input("\n是否啟動「每 10 話自動合併」模式？(Y/n): ").strip().lower() != 'n'
 
     target_folders = []
-
     if choice == '1':
-        target_folders = [os.path.join(root_dir, f) for f in comic_folders]
+        target_folders = [os.path.join(root_dir, f) for f in item_folders]
     elif choice == '2':
-        print("\n可用項目清單：")
-        for i, folder in enumerate(comic_folders, 1):
-            print(f"[{i}] {folder}")
+        print("\n可選清單：")
+        for i, f in enumerate(item_folders, 1): print(f"[{i}] {f}")
+        indices_str = input("\n請輸入編號 (例: 1,3-5): ").strip()
         
-        print("\n請輸入編號（多選請用逗號隔開，例如: 1,3,5）：")
-        indices_str = input("編號：").strip()
-        
+        # 支援逗號與範圍輸入 (例如 1,3-5)
         try:
-            # 解析輸入，支援逗號與空白
-            indices = [int(x.strip()) for x in indices_str.replace('，', ',').split(',') if x.strip().isdigit()]
-            for idx in indices:
-                if 1 <= idx <= len(comic_folders):
-                    target_folders.append(os.path.join(root_dir, comic_folders[idx-1]))
-                else:
-                    print(f"⚠️ 忽略無效編號：{idx}")
-        except ValueError:
+            for part in indices_str.replace('，', ',').split(','):
+                if '-' in part:
+                    start, end = map(int, part.split('-'))
+                    for i in range(start, end + 1):
+                        if 1 <= i <= len(item_folders): target_folders.append(os.path.join(root_dir, item_folders[i-1]))
+                elif part.strip().isdigit():
+                    idx = int(part.strip())
+                    if 1 <= idx <= len(item_folders): target_folders.append(os.path.join(root_dir, item_folders[idx-1]))
+        except:
             print("❌ 輸入格式錯誤。")
             return
     else:
-        print("❌ 無效選項，程式結束。")
         return
 
     if not target_folders:
-        print("⚠️ 未選取任何項目，程式結束。")
+        print("⚠️ 未選取任何對象。")
         return
 
-    # 開始執行轉換
-    print(f"\n🚀 開始處理 {len(target_folders)} 個項目...")
-    for folder_path in target_folders:
-        convert_comic(folder_path)
+    print(f"\n🚀 準備處理 {len(target_folders)} 個項目 (合併模式: {'開啟' if do_combine else '關閉'})...")
+    for path in target_folders:
+        convert_item(path, combine_chapters=do_combine)
 
     print("\n" + "="*40)
-    print("🎉 所有選定任務已完成！")
+    print("🎉 任務全部完成！")
     print("="*40)
-    input("\n按下 Enter 鍵關閉視窗...")
+    input("\n按下 Enter 鍵結束...")
 
 if __name__ == "__main__":
     main()
