@@ -1,0 +1,31 @@
+# Git 忽略設定
+
+# 排除 Python 編譯後的位元組碼與快取
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 排除虛擬環境 (Virtual Environments)
+venv/
+env/
+.env
+
+# 排除轉換產生的 PDF 檔案（不建議將大量二進位檔案推送到 Git）
+*.pdf
+
+# 排除影像源檔案（圖片不應進入版本控制）
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.webp
+*.tiff
+
+# 排除作業系統產生的暫存檔
+.DS_Store
+Thumbs.db
+
+# 排除開發工具設定
+.vscode/
+.idea/
