@@ -31,11 +31,12 @@ def get_folder_info(folder_name):
 # 3. 核心轉換函式
 # =================================================================
 
-def convert_item(item_path, combine_chapters=True, clear_old=False):
+def convert_item(item_path, combine_chapters=True, clear_old=False, skip_existing=False):
     """
     處理單一影像項目資料夾。
     combine_chapters: 是否啟動每 10 話合併模式。
     clear_old: 轉換前是否刪除舊的 PDF。
+    skip_existing: 是否跳過已存在的 PDF。
     """
     if not os.path.isdir(item_path):
         return
@@ -71,49 +72,32 @@ def convert_item(item_path, combine_chapters=True, clear_old=False):
         else:
             chapters.append(f)
 
-    # --- 處理 [卷]：維持一卷一個 PDF ---
+    # --- 處理 [卷] ---
     if volumes:
-        print(f"  > 偵測到 {len(volumes)} 個「卷」項目，將獨立處理...")
         for folder in volumes:
-            process_folders_to_pdf(item_path, [folder], item_name)
+            process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
 
-    # --- 處理 [話]：根據設定決定是否合併 ---
+    # --- 處理 [話] ---
     if chapters:
         if combine_chapters:
             # 每 10 話一組進行合併
             chunk_size = 10
-            print(f"  > 偵測到 {len(chapters)} 個「話」項目，將以 {chunk_size} 話為單位合併...")
             for i in range(0, len(chapters), chunk_size):
                 chunk = chapters[i:i + chunk_size]
-                process_folders_to_pdf(item_path, chunk, item_name, is_combined=True)
+                process_folders_to_pdf(item_path, chunk, item_name, is_combined=True, skip_existing=skip_existing)
         else:
             # 獨立處理每一話
-            print(f"  > 偵測到 {len(chapters)} 個「話」項目，將獨立處理...")
             for folder in chapters:
-                process_folders_to_pdf(item_path, [folder], item_name)
+                process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
 
-def process_folders_to_pdf(item_path, folders, item_name, is_combined=False):
+def process_folders_to_pdf(item_path, folders, item_name, is_combined=False, skip_existing=False):
     """將一或多個資料夾內的圖片合併為一個 PDF"""
-    all_image_paths = []
     display_numbers = []
-
-    for folder in folders:
-        folder_path = os.path.join(item_path, folder)
-        num, is_vol = get_folder_info(folder)
+    for f in folders:
+        num, _ = get_folder_info(f)
         display_numbers.append(f"{num:0{ZERO_PADDING}}")
 
-        try:
-            images = sorted(
-                [f for f in os.listdir(folder_path) if f.lower().endswith((".jpg", ".jpeg", ".png"))],
-                key=lambda x: int(os.path.splitext(x)[0]) if os.path.splitext(x)[0].isdigit() else x
-            )
-            all_image_paths.extend([os.path.join(folder_path, img) for img in images])
-        except Exception as e:
-            print(f"  ❌ 讀取 {folder} 出錯: {e}")
-
-    if not all_image_paths:
-        return
-
+    # 1. 決定輸出的 PDF 檔名
     if not is_combined:
         folder = folders[0]
         num, is_vol = get_folder_info(folder)
@@ -128,6 +112,29 @@ def process_folders_to_pdf(item_path, folders, item_name, is_combined=False):
         filename = f"{item_name} 第{start_num}-{end_num}話.pdf"
 
     output_pdf = os.path.join(item_path, filename)
+
+    # 2. 檢查是否跳過
+    if skip_existing and os.path.exists(output_pdf):
+        print(f"  ⏭️  跳過已存在：{filename}")
+        return
+
+    # 3. 蒐集圖片路徑
+    all_image_paths = []
+    for folder in folders:
+        folder_path = os.path.join(item_path, folder)
+        try:
+            images = sorted(
+                [f for f in os.listdir(folder_path) if f.lower().endswith((".jpg", ".jpeg", ".png"))],
+                key=lambda x: int(os.path.splitext(x)[0]) if os.path.splitext(x)[0].isdigit() else x
+            )
+            all_image_paths.extend([os.path.join(folder_path, img) for img in images])
+        except Exception as e:
+            print(f"  ❌ 讀取 {folder} 出錯: {e}")
+
+    if not all_image_paths:
+        return
+
+    # 4. 執行轉換
     try:
         with open(output_pdf, "wb") as f:
             f.write(img2pdf.convert(all_image_paths))
@@ -148,27 +155,37 @@ def main():
         return
 
     print("========================================")
-    print("   影像資料夾 PDF 轉換工具 (v1.3.0)")
+    print("   影像資料夾 PDF 轉換工具 (v1.4.0)")
     print("========================================")
     print(f"找到 {len(item_folders)} 個項目。")
     print("----------------------------------------")
-    print("[1] 自動處理所有項目")
-    print("[2] 手動選取特定項目")
+    print("[1] 自動處理所有項目 (完整模式)")
+    print("[2] 智慧增量更新 (僅處理遺漏的 PDF)")
+    print("[3] 手動選取特定項目")
     print("----------------------------------------")
     
-    choice = input("請輸入 1 或 2: ").strip()
+    choice = input("請輸入 1, 2 或 3: ").strip()
     
-    # 功能詢問
-    do_combine = input("\n是否啟動「每 10 話自動合併」模式？(Y/n): ").strip().lower() != 'n'
-    do_clear = input("是否在轉換前「刪除舊的 PDF 檔案」？(y/N): ").strip().lower() == 'y'
-
+    # 模式參數初始化
+    do_combine = True
+    do_clear = False
+    do_skip = False
     target_folders = []
+
     if choice == '1':
         target_folders = [os.path.join(root_dir, f) for f in item_folders]
+        do_combine = input("\n是否啟動「每 10 話自動合併」模式？(Y/n): ").strip().lower() != 'n'
+        do_clear = input("是否在轉換前「刪除舊的 PDF 檔案」？(y/N): ").strip().lower() == 'y'
     elif choice == '2':
+        target_folders = [os.path.join(root_dir, f) for f in item_folders]
+        do_combine = input("\n是否啟動「每 10 話自動合併」模式？(Y/n): ").strip().lower() != 'n'
+        do_skip = True # 增量模式強制啟動跳過機制
+    elif choice == '3':
         print("\n可選清單：")
         for i, f in enumerate(item_folders, 1): print(f"[{i}] {f}")
         indices_str = input("\n請輸入編號 (例: 1,3-5): ").strip()
+        do_combine = input("\n是否啟動「每 10 話自動合併」模式？(Y/n): ").strip().lower() != 'n'
+        do_skip = input("是否跳過已存在的 PDF？(Y/n): ").strip().lower() != 'n'
         try:
             for part in indices_str.replace('，', ',').split(','):
                 if '-' in part:
@@ -189,10 +206,10 @@ def main():
         return
 
     print(f"\n🚀 準備處理 {len(target_folders)} 個項目...")
-    print(f"設定：合併模式={'開啟' if do_combine else '關閉'}, 清理舊檔={'開啟' if do_clear else '關閉'}")
+    print(f"設定：合併模式={'開啟' if do_combine else '關閉'}, 清理舊檔={'開啟' if do_clear else '關閉'}, 增量跳過={'開啟' if do_skip else '關閉'}")
     
     for path in target_folders:
-        convert_item(path, combine_chapters=do_combine, clear_old=do_clear)
+        convert_item(path, combine_chapters=do_combine, clear_old=do_clear, skip_existing=do_skip)
 
     print("\n" + "="*40)
     print("🎉 任務全部完成！")
