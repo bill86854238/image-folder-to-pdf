@@ -31,16 +31,28 @@ def get_folder_info(folder_name):
 # 3. 核心轉換函式
 # =================================================================
 
-def convert_item(item_path, combine_chapters=True):
+def convert_item(item_path, combine_chapters=True, clear_old=False):
     """
     處理單一影像項目資料夾。
     combine_chapters: 是否啟動每 10 話合併模式。
+    clear_old: 轉換前是否刪除舊的 PDF。
     """
     if not os.path.isdir(item_path):
         return
 
     item_name = os.path.basename(item_path)
     print(f"\n📂 正在處理項目：{item_name}")
+
+    # --- 環境清理：刪除舊的 PDF ---
+    if clear_old:
+        old_pdfs = [f for f in os.listdir(item_path) if f.lower().endswith(".pdf")]
+        if old_pdfs:
+            print(f"  🧹 正在清理舊的 PDF 檔案 (共 {len(old_pdfs)} 個)...")
+            for pdf in old_pdfs:
+                try:
+                    os.remove(os.path.join(item_path, pdf))
+                except Exception as e:
+                    print(f"  ⚠️ 無法刪除 {pdf}: {e}")
 
     # 取得所有子資料夾並排序
     sub_folders = sorted([f for f in os.listdir(item_path) if os.path.isdir(os.path.join(item_path, f))])
@@ -81,20 +93,15 @@ def convert_item(item_path, combine_chapters=True):
                 process_folders_to_pdf(item_path, [folder], item_name)
 
 def process_folders_to_pdf(item_path, folders, item_name, is_combined=False):
-    """
-    將一或多個資料夾內的圖片合併為一個 PDF。
-    folders: 資料夾名稱清單（若長度 > 1 則代表要合併）。
-    """
+    """將一或多個資料夾內的圖片合併為一個 PDF"""
     all_image_paths = []
     display_numbers = []
 
-    # 1. 蒐集所有圖片路徑與編號資訊
     for folder in folders:
         folder_path = os.path.join(item_path, folder)
         num, is_vol = get_folder_info(folder)
         display_numbers.append(f"{num:0{ZERO_PADDING}}")
 
-        # 讀取並排序資料夾內的圖片
         try:
             images = sorted(
                 [f for f in os.listdir(folder_path) if f.lower().endswith((".jpg", ".jpeg", ".png"))],
@@ -107,29 +114,19 @@ def process_folders_to_pdf(item_path, folders, item_name, is_combined=False):
     if not all_image_paths:
         return
 
-    # 2. 決定輸出的 PDF 檔名
-    # 如果是單一資料夾，嘗試抓取標題；如果是合併檔，則顯示編號範圍
     if not is_combined:
         folder = folders[0]
         num, is_vol = get_folder_info(folder)
         num_str = f"{num:0{ZERO_PADDING}}"
         type_str = "卷" if is_vol else "話"
-        
-        # 提取標題文字
         title = re.sub(r'(第)?\d+(話|话|回|卷|捲)?', '', folder).strip()
         title = cc.convert(title)
-        
-        if title:
-            filename = f"{item_name} 第{num_str}{type_str}-{title}.pdf"
-        else:
-            filename = f"{item_name} 第{num_str}{type_str}.pdf"
+        filename = f"{item_name} 第{num_str}{type_str}{'-' + title if title else ''}.pdf"
     else:
-        # 合併模式：格式為「第0001-0010話」
         start_num = display_numbers[0]
         end_num = display_numbers[-1]
         filename = f"{item_name} 第{start_num}-{end_num}話.pdf"
 
-    # 3. 執行轉換
     output_pdf = os.path.join(item_path, filename)
     try:
         with open(output_pdf, "wb") as f:
@@ -151,7 +148,7 @@ def main():
         return
 
     print("========================================")
-    print("   影像資料夾 PDF 轉換工具 (v1.2.0)")
+    print("   影像資料夾 PDF 轉換工具 (v1.3.0)")
     print("========================================")
     print(f"找到 {len(item_folders)} 個項目。")
     print("----------------------------------------")
@@ -161,8 +158,9 @@ def main():
     
     choice = input("請輸入 1 或 2: ").strip()
     
-    # 問合併意願
+    # 功能詢問
     do_combine = input("\n是否啟動「每 10 話自動合併」模式？(Y/n): ").strip().lower() != 'n'
+    do_clear = input("是否在轉換前「刪除舊的 PDF 檔案」？(y/N): ").strip().lower() == 'y'
 
     target_folders = []
     if choice == '1':
@@ -171,8 +169,6 @@ def main():
         print("\n可選清單：")
         for i, f in enumerate(item_folders, 1): print(f"[{i}] {f}")
         indices_str = input("\n請輸入編號 (例: 1,3-5): ").strip()
-        
-        # 支援逗號與範圍輸入 (例如 1,3-5)
         try:
             for part in indices_str.replace('，', ',').split(','):
                 if '-' in part:
@@ -192,9 +188,11 @@ def main():
         print("⚠️ 未選取任何對象。")
         return
 
-    print(f"\n🚀 準備處理 {len(target_folders)} 個項目 (合併模式: {'開啟' if do_combine else '關閉'})...")
+    print(f"\n🚀 準備處理 {len(target_folders)} 個項目...")
+    print(f"設定：合併模式={'開啟' if do_combine else '關閉'}, 清理舊檔={'開啟' if do_clear else '關閉'}")
+    
     for path in target_folders:
-        convert_item(path, combine_chapters=do_combine)
+        convert_item(path, combine_chapters=do_combine, clear_old=do_clear)
 
     print("\n" + "="*40)
     print("🎉 任務全部完成！")
