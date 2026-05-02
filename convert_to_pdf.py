@@ -2,7 +2,7 @@ import os
 import img2pdf
 import re
 from opencc import OpenCC
-import pikepdf  # 用於加入 PDF 書籤
+import pikepdf
 
 # =================================================================
 # 1. 全域初始化設定
@@ -10,14 +10,12 @@ import pikepdf  # 用於加入 PDF 書籤
 
 cc = OpenCC('s2t')
 
-# 正則表達式：支援整數與小數 (例如 105 或 105.5)
-# \d+(\.\d+)? 代表可以匹配 105 或 105.5
+# 正則表達式：支援整數與小數
 num_with_tag_pattern = re.compile(r'(\d+(?:\.\d+)?)\s*(?:話|话|回|卷|捲|集)')
 any_number_pattern = re.compile(r'(\d+(?:\.\d+)?)')
 
 ZERO_PADDING = 4
 
-# 全域統計追蹤
 stats = {
     "total_projects": 0,
     "success_count": 0,
@@ -30,7 +28,13 @@ stats = {
 # =================================================================
 
 def get_folder_info(folder_name):
-    """從資料夾名稱提取編號與類型（支援小數點話數）"""
+    """
+    從資料夾名稱提取資訊。
+    傳回: (number, is_volume, has_real_number)
+    """
+    is_volume = any(k in folder_name for k in ["卷", "捲"])
+    has_real_number = True
+    
     # 優先找標籤前的數字
     tag_match = num_with_tag_pattern.search(folder_name)
     if tag_match:
@@ -38,10 +42,13 @@ def get_folder_info(folder_name):
     else:
         # 沒標籤才找隨機數字
         any_match = any_number_pattern.search(folder_name)
-        number = float(any_match.group(1)) if any_match else 999999.0
+        if any_match:
+            number = float(any_match.group(1))
+        else:
+            number = 999999.0 # 無數字排最後
+            has_real_number = False
 
-    is_volume = any(k in folder_name for k in ["卷", "捲"])
-    return number, is_volume
+    return number, is_volume, has_real_number
 
 # =================================================================
 # 3. 核心轉換與書籤函式
@@ -62,28 +69,42 @@ def convert_item(item_path, combine_chapters=True, clear_old=False, skip_existin
             try: os.remove(os.path.join(item_path, pdf))
             except: pass
 
-    # 取得子資料夾並按數值排序 (支援 105.5 排在 105 之後)
+    # 取得子資料夾並按數值排序
     sub_folders = [f for f in os.listdir(item_path) if os.path.isdir(os.path.join(item_path, f))]
     sub_folders.sort(key=lambda f: get_folder_info(f)[0])
     
     if not sub_folders:
         return
 
-    volumes = []
-    chapters = []
-    for f in sub_folders:
-        _, is_vol = get_folder_info(f)
-        if is_vol: volumes.append(f)
-        else: chapters.append(f)
+    # --- 三路分類邏輯 ---
+    volumes = []   # 卷/捲
+    chapters = []  # 有編號的話數
+    others = []    # 完全無編號的項目 (如: 小劇場、番外篇)
 
-    # 處理 [卷]
+    for f in sub_folders:
+        num, is_vol, has_num = get_folder_info(f)
+        if is_vol:
+            volumes.append(f)
+        elif has_num:
+            chapters.append(f)
+        else:
+            others.append(f)
+
+    # 1. 處理 [卷]：獨立處理
     for folder in volumes:
         process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
 
-    # 處理 [話] (每 10 話合併)
+    # 2. 處理 [其他無編號項目]：獨立處理
+    if others:
+        print(f"  > 偵測到 {len(others)} 個特殊/無編號項目，將獨立處理...")
+        for folder in others:
+            process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
+
+    # 3. 處理 [正規話數]：視情況合併
     if chapters:
         if combine_chapters:
             chunk_size = 10
+            print(f"  > 偵測到 {len(chapters)} 個話數項目，將以 {chunk_size} 話為單位合併...")
             for i in range(0, len(chapters), chunk_size):
                 chunk = chapters[i:i + chunk_size]
                 process_folders_to_pdf(item_path, chunk, item_name, is_combined=True, skip_existing=skip_existing)
@@ -92,45 +113,40 @@ def convert_item(item_path, combine_chapters=True, clear_old=False, skip_existin
                 process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
 
 def add_bookmarks_to_pdf(pdf_path, bookmarks):
-    """
-    使用 pikepdf 為 PDF 加入書籤 (Outlines)。
-    bookmarks: 清單，格式為 (頁碼, 標題)
-    """
+    """為 PDF 加入書籤"""
     try:
         with pikepdf.open(pdf_path, allow_overwriting_input=True) as pdf:
             with pdf.open_outline() as outline:
                 for page_num, title in bookmarks:
-                    # page_num 從 0 開始計數
                     new_bookmark = pikepdf.OutlineItem(title, page_num)
                     outline.root.append(new_bookmark)
             pdf.save(pdf_path)
-    except Exception as e:
-        print(f"  ⚠️ 無法加入書籤：{e}")
+    except: pass
 
 def process_folders_to_pdf(item_path, folders, item_name, is_combined=False, skip_existing=False):
-    """將一或多個資料夾內的圖片合併為一個 PDF 並加入書籤"""
+    """將一或多個資料夾內的圖片合併為一個 PDF"""
     
-    # 準備編號與書籤資訊
-    valid_numbers = []
-    bookmark_info = [] # 儲存 (起始頁碼, 標題)
-    current_page_offset = 0
-
     # 1. 決定檔名
     if not is_combined:
         folder = folders[0]
-        num, is_vol = get_folder_info(folder)
-        # 如果是整數就印整數，是小數就印小數
-        num_str = f"{int(num):0{ZERO_PADDING}}" if num.is_integer() else f"{num:0{ZERO_PADDING}}"
-        type_str = "卷" if is_vol else "話"
-        title = re.sub(r'(第)?\d+(?:\.\d+)?(話|话|回|卷|捲)?', '', folder).strip()
-        title = cc.convert(title)
-        filename = f"{item_name} 第{num_str}{type_str}{'-' + title if title else ''}.pdf"
-    else:
-        for f in folders:
-            num, _ = get_folder_info(f)
+        num, is_vol, has_num = get_folder_info(folder)
+        
+        if has_num:
             num_str = f"{int(num):0{ZERO_PADDING}}" if num.is_integer() else f"{num:0{ZERO_PADDING}}"
-            valid_numbers.append(num_str)
-        filename = f"{item_name} 第{valid_numbers[0]}-{valid_numbers[-1]}話.pdf"
+            type_str = "卷" if is_vol else "話"
+            title = re.sub(r'(第)?\d+(?:\.\d+)?(話|话|回|卷|捲)?', '', folder).strip()
+            title = cc.convert(title)
+            filename = f"{item_name} 第{num_str}{type_str}{'-' + title if title else ''}.pdf"
+        else:
+            # 無編號項目，直接用資料夾名稱轉繁體
+            filename = f"{item_name} {cc.convert(folder)}.pdf"
+    else:
+        # 合併檔名：提取首尾話數
+        nums = []
+        for f in folders:
+            n, _, _ = get_folder_info(f)
+            nums.append(f"{int(n):0{ZERO_PADDING}}" if n.is_integer() else f"{n:0{ZERO_PADDING}}")
+        filename = f"{item_name} 第{nums[0]}-{nums[-1]}話.pdf"
 
     output_pdf = os.path.join(item_path, filename)
 
@@ -139,8 +155,11 @@ def process_folders_to_pdf(item_path, folders, item_name, is_combined=False, ski
         stats["skip_count"] += 1
         return
 
-    # 2. 蒐集圖片路徑與計算書籤位置
+    # 2. 蒐集圖片與書籤
     all_image_paths = []
+    bookmark_info = []
+    current_page_offset = 0
+
     for folder in folders:
         folder_path = os.path.join(item_path, folder)
         try:
@@ -149,8 +168,6 @@ def process_folders_to_pdf(item_path, folders, item_name, is_combined=False, ski
                 key=lambda x: int(os.path.splitext(x)[0]) if os.path.splitext(x)[0].isdigit() else x
             )
             if images:
-                # 紀錄這一話的書籤：起始頁碼與資料夾名稱
-                # 使用 OpenCC 將資料夾名稱轉為繁體作為書籤標題
                 bookmark_info.append((current_page_offset, cc.convert(folder)))
                 all_image_paths.extend([os.path.join(folder_path, img) for img in images])
                 current_page_offset += len(images)
@@ -158,15 +175,12 @@ def process_folders_to_pdf(item_path, folders, item_name, is_combined=False, ski
 
     if not all_image_paths: return
 
-    # 3. 轉換 PDF
+    # 3. 轉換與後處理
     try:
         with open(output_pdf, "wb") as f:
             f.write(img2pdf.convert(all_image_paths))
-        
-        # 4. 如果是合併檔，加入書籤
         if is_combined and len(folders) > 1:
             add_bookmarks_to_pdf(output_pdf, bookmark_info)
-            
         print(f"  ✅ 完成：{filename}")
         stats["success_count"] += 1
     except Exception as e:
@@ -186,7 +200,7 @@ def main():
         return
 
     print("========================================")
-    print("   影像資料夾 PDF 轉換工具 (v1.6.0)")
+    print("   影像資料夾 PDF 轉換工具 (v1.6.1)")
     print("========================================")
     
     print("[1] 完整模式  [2] 智慧增量  [3] 手動選取")
@@ -227,7 +241,6 @@ def main():
     for path in target_folders:
         convert_item(path, combine_chapters=do_combine, clear_old=do_clear, skip_existing=do_skip)
 
-    # --- 最終統計報告 ---
     print("\n" + "="*40)
     print("       任務執行總結報告")
     print("="*40)
@@ -236,10 +249,7 @@ def main():
     print(f"跳過已存在檔：{stats['skip_count']}")
     if stats["fail_list"]:
         print(f"失敗清單 (共 {len(stats['fail_list'])} 個)：")
-        for f in stats["fail_list"]:
-            print(f"  - {f}")
-    else:
-        print("所有任務均已順利完成，無失敗項目。")
+        for f in stats["fail_list"]: print(f"  - {f}")
     print("="*40)
     input("\n按下 Enter 鍵結束...")
 
