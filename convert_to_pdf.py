@@ -54,8 +54,10 @@ def get_folder_info(folder_name):
 # 3. 核心轉換與書籤函式
 # =================================================================
 
-def convert_item(item_path, combine_chapters=True, clear_old=False, skip_existing=False):
-    """處理單一影像項目資料夾"""
+OUTPUT_SUBDIRS = {"卷", "話", "特殊"}
+
+def convert_item(item_path, combine_chapters=True, combine_volumes=True, process_chapters=True, clear_old=False, skip_existing=False):
+    """處理單一影像項目資料夾，並依類型分流轉為 PDF"""
     if not os.path.isdir(item_path):
         return
 
@@ -64,13 +66,18 @@ def convert_item(item_path, combine_chapters=True, clear_old=False, skip_existin
     stats["total_projects"] += 1
 
     if clear_old:
-        old_pdfs = [f for f in os.listdir(item_path) if f.lower().endswith(".pdf")]
-        for pdf in old_pdfs:
-            try: os.remove(os.path.join(item_path, pdf))
-            except: pass
+        # 清理本目錄及分類子目錄下的既有 PDF
+        for root, _, files in os.walk(item_path):
+            for pdf in files:
+                if pdf.lower().endswith(".pdf"):
+                    try: os.remove(os.path.join(root, pdf))
+                    except: pass
 
-    # 取得子資料夾並按數值排序
-    sub_folders = [f for f in os.listdir(item_path) if os.path.isdir(os.path.join(item_path, f))]
+    # 取得子資料夾並按數值排序（排除 PDF 歸檔專用之子目錄）
+    sub_folders = [
+        f for f in os.listdir(item_path) 
+        if os.path.isdir(os.path.join(item_path, f)) and f not in OUTPUT_SUBDIRS
+    ]
     sub_folders.sort(key=lambda f: get_folder_info(f)[0])
     
     if not sub_folders:
@@ -90,9 +97,17 @@ def convert_item(item_path, combine_chapters=True, clear_old=False, skip_existin
         else:
             others.append(f)
 
-    # 1. 處理 [卷]：獨立處理
-    for folder in volumes:
-        process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
+    # 1. 處理 [卷]：視設定進行 5 卷分塊合併或獨立處理
+    if volumes:
+        if combine_volumes:
+            chunk_size = 5
+            print(f"  > 偵測到 {len(volumes)} 個卷項目，將以 {chunk_size} 卷為單位合併...")
+            for i in range(0, len(volumes), chunk_size):
+                chunk = volumes[i:i + chunk_size]
+                process_folders_to_pdf(item_path, chunk, item_name, is_combined=True, skip_existing=skip_existing)
+        else:
+            for folder in volumes:
+                process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
 
     # 2. 處理 [其他無編號項目]：獨立處理
     if others:
@@ -100,9 +115,11 @@ def convert_item(item_path, combine_chapters=True, clear_old=False, skip_existin
         for folder in others:
             process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
 
-    # 3. 處理 [正規話數]：視情況合併
+    # 3. 處理 [正規話數]：視設定轉換或略過
     if chapters:
-        if combine_chapters:
+        if not process_chapters:
+            print(f"  ⏭️  已略過 {len(chapters)} 個話數項目（依設定不轉話數）")
+        elif combine_chapters:
             chunk_size = 10
             print(f"  > 偵測到 {len(chapters)} 個話數項目，將以 {chunk_size} 話為單位合併...")
             for i in range(0, len(chapters), chunk_size):
@@ -124,16 +141,30 @@ def add_bookmarks_to_pdf(pdf_path, bookmarks):
     except: pass
 
 def process_folders_to_pdf(item_path, folders, item_name, is_combined=False, skip_existing=False):
-    """將一或多個資料夾內的圖片合併為一個 PDF"""
+    """將一或多個資料夾內的圖片合併為一個 PDF，並依類型分流至對應子目錄 (卷/話/特殊) 歸檔"""
     
-    # 1. 決定檔名
+    # 1. 判定歸檔類別並建立專屬子目錄 (卷 / 話 / 特殊)
+    _, is_vol, has_num = get_folder_info(folders[0])
+    if is_vol:
+        sub_dir_name = "卷"
+        type_str = "卷"
+    elif has_num:
+        sub_dir_name = "話"
+        type_str = "話"
+    else:
+        sub_dir_name = "特殊"
+        type_str = ""
+
+    output_dir = os.path.join(item_path, sub_dir_name)
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 2. 決定檔名規格
     if not is_combined:
         folder = folders[0]
-        num, is_vol, has_num = get_folder_info(folder)
+        num, _, has_num = get_folder_info(folder)
         
         if has_num:
             num_str = f"{int(num):0{ZERO_PADDING}}" if num.is_integer() else f"{num:0{ZERO_PADDING}}"
-            type_str = "卷" if is_vol else "話"
             title = re.sub(r'(第)?\d+(?:\.\d+)?(話|话|回|卷|捲)?', '', folder).strip()
             title = cc.convert(title)
             filename = f"{item_name} 第{num_str}{type_str}{'-' + title if title else ''}.pdf"
@@ -141,14 +172,18 @@ def process_folders_to_pdf(item_path, folders, item_name, is_combined=False, ski
             # 無編號項目，直接用資料夾名稱轉繁體
             filename = f"{item_name} {cc.convert(folder)}.pdf"
     else:
-        # 合併檔名：提取首尾話數
+        # 合併檔名：提取首尾編號，並依類型 (卷/話) 命名
         nums = []
         for f in folders:
             n, _, _ = get_folder_info(f)
             nums.append(f"{int(n):0{ZERO_PADDING}}" if n.is_integer() else f"{n:0{ZERO_PADDING}}")
-        filename = f"{item_name} 第{nums[0]}-{nums[-1]}話.pdf"
+        
+        if len(folders) == 1:
+            filename = f"{item_name} 第{nums[0]}{type_str}.pdf"
+        else:
+            filename = f"{item_name} 第{nums[0]}-{nums[-1]}{type_str}.pdf"
 
-    output_pdf = os.path.join(item_path, filename)
+    output_pdf = os.path.join(output_dir, filename)
 
     if skip_existing and os.path.exists(output_pdf):
         print(f"  ⏭️  跳過已存在：{filename}")
@@ -200,30 +235,47 @@ def main():
         return
 
     print("========================================")
-    print("   影像資料夾 PDF 轉換工具 (v1.6.1)")
+    print("   影像資料夾 PDF 轉換工具 (v1.7.0)")
     print("========================================")
     
     print("[1] 完整模式  [2] 智慧增量  [3] 手動選取")
     choice = input("請輸入: ").strip()
     
     do_combine = True
+    do_combine_vol = True
+    do_process_chaps = True
     do_clear = False
     do_skip = False
     target_folders = []
 
     if choice == '1':
         target_folders = [os.path.join(root_dir, f) for f in item_folders]
-        do_combine = input("合併模式 (10 話一包)？(Y/n): ").lower() != 'n'
+        do_combine_vol = input("合併卷模式 (5 卷一包)？(Y/n): ").lower() != 'n'
+        do_process_chaps = input("是否轉換話數 (連載)？(Y/n): ").lower() != 'n'
+        if do_process_chaps:
+            do_combine = input("合併話模式 (10 話一包)？(Y/n): ").lower() != 'n'
+        else:
+            do_combine = False
         do_clear = input("清理舊檔？(y/N): ").lower() == 'y'
     elif choice == '2':
         target_folders = [os.path.join(root_dir, f) for f in item_folders]
-        do_combine = input("合併模式 (10 話一包)？(Y/n): ").lower() != 'n'
+        do_combine_vol = input("合併卷模式 (5 卷一包)？(Y/n): ").lower() != 'n'
+        do_process_chaps = input("是否轉換話數 (連載)？(Y/n): ").lower() != 'n'
+        if do_process_chaps:
+            do_combine = input("合併話模式 (10 話一包)？(Y/n): ").lower() != 'n'
+        else:
+            do_combine = False
         do_skip = True
     elif choice in ['3', '']:
         print("\n清單：")
         for i, f in enumerate(item_folders, 1): print(f"[{i}] {f}")
         indices_str = input("編號 (例: 1,3-5): ").strip()
-        do_combine = input("合併模式？(Y/n): ").lower() != 'n'
+        do_combine_vol = input("合併卷模式 (5 卷一包)？(Y/n): ").lower() != 'n'
+        do_process_chaps = input("是否轉換話數 (連載)？(Y/n): ").lower() != 'n'
+        if do_process_chaps:
+            do_combine = input("合併話模式 (10 話一包)？(Y/n): ").lower() != 'n'
+        else:
+            do_combine = False
         do_skip = input("跳過已存在？(Y/n): ").lower() != 'n'
         try:
             for part in indices_str.replace('，', ',').split(','):
@@ -237,9 +289,9 @@ def main():
         except: return
     else: return
 
-    print(f"\n🚀 啟動處理 (合併:{do_combine}, 清理:{do_clear}, 增量:{do_skip})...")
+    print(f"\n🚀 啟動處理 (合卷:{do_combine_vol}, 轉話:{do_process_chaps}, 合話:{do_combine}, 清理:{do_clear}, 增量:{do_skip})...")
     for path in target_folders:
-        convert_item(path, combine_chapters=do_combine, clear_old=do_clear, skip_existing=do_skip)
+        convert_item(path, combine_chapters=do_combine, combine_volumes=do_combine_vol, process_chapters=do_process_chaps, clear_old=do_clear, skip_existing=do_skip)
 
     print("\n" + "="*40)
     print("       任務執行總結報告")

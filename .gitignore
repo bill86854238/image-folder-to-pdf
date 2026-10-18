@@ -29,3 +29,7 @@ Thumbs.db
 # 排除開發工具設定
 .vscode/
 .idea/
+
+# 排除小說電子書原始檔與備份目錄
+*.epub
+backup_original_epubs/
