@@ -115,13 +115,18 @@ def convert_item(item_path, combine_chapters=True, combine_volumes=True, process
         for folder in others:
             process_folders_to_pdf(item_path, [folder], item_name, skip_existing=skip_existing)
 
-    # 3. 處理 [正規話數]：視設定轉換或略過
+    # 3. 處理 [正規話數]：視設定轉換或略過（無卷時啟動保底轉換）
     if chapters:
-        if not process_chapters:
+        if not process_chapters and volumes:
+            # 既有卷又有話，且設定不轉話數 -> 依設定略過話數
             print(f"  ⏭️  已略過 {len(chapters)} 個話數項目（依設定不轉話數）")
-        elif combine_chapters:
+        elif (not process_chapters and not volumes) or combine_chapters:
+            # 觸發無卷保底，或原本即設定合併話數 (10 話一包)
             chunk_size = 10
-            print(f"  > 偵測到 {len(chapters)} 個話數項目，將以 {chunk_size} 話為單位合併...")
+            if not process_chapters and not volumes:
+                print(f"  💡 偵測到本項目無任何卷數，啟動保底機制（以 {chunk_size} 話為單位合併）...")
+            else:
+                print(f"  > 偵測到 {len(chapters)} 個話數項目，將以 {chunk_size} 話為單位合併...")
             for i in range(0, len(chapters), chunk_size):
                 chunk = chapters[i:i + chunk_size]
                 process_folders_to_pdf(item_path, chunk, item_name, is_combined=True, skip_existing=skip_existing)
@@ -235,7 +240,7 @@ def main():
         return
 
     print("========================================")
-    print("   影像資料夾 PDF 轉換工具 (v1.7.0)")
+    print("   影像資料夾 PDF 轉換工具 (v1.7.1)")
     print("========================================")
     
     print("[1] 完整模式  [2] 智慧增量  [3] 手動選取")
